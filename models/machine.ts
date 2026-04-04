@@ -1,115 +1,111 @@
-import { Beverage } from "./beverage";
-import { Coin } from "./coin";
-import { log } from "../lib/logger";
-export class Machine{
-   private sellList:Beverage[];
-   private buyList:Beverage[];
-   private total:Coin[];
-   constructor(){
-    this.sellList = [];
-    this.buyList = [];
-    this.total = [];
-   }
-    makeBuyList():Beverage[]{
-    //    console.log(this.buyList);
-       log.debug(JSON.stringify(this.buyList));
-       return this.buyList;
+import {Beverage} from "./beverage";
+import {Coin, Currency} from "./coin";
+import {orderedCoins} from "./coinListSeq";
+import {log} from "../lib/logger";
+import Soldouterror from "./soldouterror";
+import Balanceerror from "./balanceerror";
+
+
+export class Machine {
+    private sellList: Beverage[];
+    private buyList: Beverage[];
+    private total: Coin[];
+
+    constructor() {
+        this.sellList = [];
+        this.buyList = [];
+        this.total = [];
     }
-    makeItemList():Beverage[]{
-        // console.log(this.sellList);
+
+    makeBuyList(): Beverage[] {
+        log.debug(JSON.stringify(this.buyList));
+        return this.buyList;
+    }
+
+
+    makeItemList(): Beverage[] {
         log.debug(JSON.stringify(this.sellList));
         return this.sellList;
     }
-    makeCoinList():Coin[]{
-        // console.log(this.total);
+
+    makeCoinList(): Coin[] {
         log.debug(JSON.stringify(this.total));
         return this.total;
     }
-    async makeChange(){
+
+    async makeChange() {
         let sum = 0;
         for (const coin of this.total) {
-            sum += coin.amount;
+            sum += coin.getAmount();
         }
         log.info(`총 ${sum}원 입니다.`);
         return sum;
     }
-    addItem(item:Beverage){
+
+    addItem(item: Beverage) {
         this.sellList.push(item);
-        // console.log(`${item.name}을 추가했습니다.`);
         log.info(`${item.name}을 추가했습니다.`);
         return this.sellList;
     }
-    async buyItem(item:Beverage){
-        if(item.count<=0){
-            // console.log(`${item.name}은 품절입니다.`);
-            log.info(`${item.name}은 품절입니다.`);
-            return false;
-        }else{
-            let itemPrice = item.price;
-            const coinList = this.total.filter(item=>item.currency === "KRW")
-                .concat(this.total.filter(item=>item.currency === "USD")
-                .concat(this.total.filter(item=>item.currency === "JPY")));
 
-            const sum = await this.makeChange();
+    async buyItem(item: Beverage) {
+        this.vaildateSoldout(item);
+        let itemPrice = item.price;
+        const coinList = orderedCoins(this.total);
+        const sum = await this.makeChange();
+        this.vaildateBalance(item, sum);
 
-            if(sum < itemPrice){
-                // console.log("금액이 부족합니다.");
-                log.info("금액이 부족합니다.");
-                return false;
-            }else {
-                for(const coin of coinList){
-                    if(itemPrice>=coin.amount){
-                        itemPrice = await coin.returnChange(itemPrice,coin);
-                        coin.amount = 0;
-                        const existing = this.total.find((c) => c.currency === coin.currency);
-                        if (existing) {
-                            existing.amount += coin.amount;
-                        }
-                    }else if(itemPrice<coin.amount){
-                        console.log("itemPrice : ",itemPrice);
-                        const existing = this.total.find((c) => c.currency === coin.currency);
-                        if (existing) {
-                            existing.amount = await coin.returnChange(-itemPrice,coin);
-                            itemPrice = 0;
-                        }
-                    }
+        for (const coin of coinList) {
+            const existing = this.findCoinByCurrency(coin.currency);
+            if (itemPrice >= coin.getAmount()) {
+                itemPrice = await coin.returnChange(itemPrice,coin);
+                coin.setAmount(0);
+                if (existing) {
+                    existing.setAmount(existing.getAmount() + coin.getAmount());
                 }
+            } else if (itemPrice < coin.getAmount()) {
+                if (existing) {
+                    existing.setAmount(await coin.returnChange(-itemPrice,coin));
+                    itemPrice = 0;
+                }
+            }
+        }
 
-                item.count--;
-                this.buyList.push(item);
-                // console.log(`${item.name}을 구매했습니다.`);
-                log.info(`${item.name}을 구매했습니다.`);
-                // console.log(`거스름 돈은 ${sum - item.price}원 입니다.`);
-                log.info(`거스름 돈은 ${sum - item.price}원 입니다.`);
-                return item;
-            }
-        }
+        item.decreaseCount();
+        this.buyList.push(item);
+        log.info(`${item.name}을 구매했습니다.`);
+        log.info(`거스름 돈은 ${sum - item.price}원 입니다.`);
+        return item;
     }
+
     async insertCoin(coin: Coin) {
-        const existing = this.total.find((c) => c.currency === coin.currency);
+        if (coin.currency !== "KRW") {
+            await coin.exChangeCoin(coin);
+        }
+        const existing = this.findCoinByCurrency(coin.currency);
         if (existing) {
-            if (coin.currency === "KRW") {
-                existing.amount += coin.amount;
-            } else {
-                const converted = await coin.exChangeCoin(coin);
-                existing.amount += converted.amount;
-            }
+            existing.setAmount(existing.getAmount() + coin.getAmount());
             return;
         }
-        if (coin.currency === "KRW") {
-            this.total.push(coin);
-            return;
-        }
-        this.total.push(await coin.exChangeCoin(coin));
+        this.total.push(coin);
     }
-    async retrunChange(item:Beverage,coin:Coin){
-        const change = await coin.returnChange(item.price,coin);
-        if(change < 0){
-            return false;
-        }else {
-            return true;
+
+    private findCoinByCurrency(currency: Currency): Coin | undefined {
+        return this.total.find((c) => c.currency === currency);
+    }
+
+    vaildateSoldout(item: Beverage): void {
+        if (item.getCount() <= 0) {
+            log.warn(`${item.name}은 품절입니다.`);
+            throw new Soldouterror(`${item.name}은 품절입니다.`);
         }
-        
+    }
+
+    vaildateBalance(item: Beverage, sum: number): void {
+        if (sum < item.price) {
+            log.warn("금액이 부족합니다.");
+            throw new Balanceerror("금액이 부족합니다.");
+        }
     }
 
 }
